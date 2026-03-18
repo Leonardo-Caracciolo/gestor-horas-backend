@@ -1,21 +1,19 @@
 """
-database.py — Configuración de la conexión a SQL Server.
+database.py — Configuracion de la conexion a SQL Server.
 
-En producción/desarrollo: SQL Server via taxteclib.SqlServerClient,
-probando múltiples drivers ODBC hasta encontrar uno disponible.
-En tests (APP_ENV=testing): SQLite en memoria para velocidad y aislamiento.
+- APP_ENV=testing  → SQLite en memoria (StaticPool)
+- DB_USER vacio    → Windows Authentication (Trusted_Connection)
+- DB_USER presente → SQL Authentication via taxteclib
 """
 import logging
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, Session
 from typing import Generator
-from taxteclib import SqlServerClient
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# Drivers a intentar en orden de preferencia
 _ODBC_DRIVERS = [
     "ODBC Driver 17 for SQL Server",
     "ODBC Driver 13 for SQL Server",
@@ -23,25 +21,30 @@ _ODBC_DRIVERS = [
 ]
 
 
-def _try_drivers(server: str, database: str, user: str, password: str):
-    """
-    Intenta conectarse a SQL Server probando múltiples drivers ODBC.
+def _try_drivers_trusted(server: str, database: str):
+    """Conecta usando Windows Authentication (sin usuario/password)."""
+    last_error = None
+    for driver in _ODBC_DRIVERS:
+        try:
+            conn_str = (
+                f"mssql+pyodbc://@{server}/{database}"
+                f"?driver={driver.replace(' ', '+')}"
+                f"&Trusted_Connection=yes"
+            )
+            engine = create_engine(conn_str, echo=False)
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            logger.info(f"Conectado a SQL Server (Windows Auth) usando driver: {driver}")
+            return engine
+        except Exception as e:
+            logger.warning(f"Driver '{driver}' fallo (Windows Auth): {e}")
+            last_error = e
+    raise RuntimeError(f"No se pudo conectar con Windows Authentication. Ultimo error: {last_error}")
 
-    Itera sobre _ODBC_DRIVERS y devuelve el primer SqlServerClient
-    que logre establecer conexión.
 
-    Args:
-        server:   Nombre o IP del servidor SQL Server.
-        database: Nombre de la base de datos.
-        user:     Usuario de la base de datos.
-        password: Contraseña del usuario.
-
-    Returns:
-        SqlServerClient: Cliente conectado con el primer driver disponible.
-
-    Raises:
-        RuntimeError: Si ningún driver logra conectarse.
-    """
+def _try_drivers_sql(server: str, database: str, user: str, password: str):
+    """Conecta usando SQL Authentication via taxteclib."""
+    from taxteclib import SqlServerClient
     last_error = None
     for driver in _ODBC_DRIVERS:
         try:
@@ -52,41 +55,35 @@ def _try_drivers(server: str, database: str, user: str, password: str):
                 dbname=database,
                 driver=driver,
             )
-            # Verificar que la conexión es real antes de aceptarla
             with client.engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
-            logger.info(f"✅ Conectado a SQL Server usando driver: {driver}")
-            return client
+            logger.info(f"Conectado a SQL Server (SQL Auth) usando driver: {driver}")
+            return client.engine
         except Exception as e:
-            logger.warning(f"Driver '{driver}' falló: {e}")
+            logger.warning(f"Driver '{driver}' fallo: {e}")
             last_error = e
-
-    raise RuntimeError(
-        f"No se pudo conectar a SQL Server con ningún driver disponible. "
-        f"Último error: {last_error}"
-    )
+    raise RuntimeError(f"No se pudo conectar a SQL Server. Ultimo error: {last_error}")
 
 
 def _build_engine():
-    """Construye el engine según el entorno."""
     if settings.APP_ENV == "testing":
         from sqlalchemy.pool import StaticPool
-        # StaticPool: todas las sesiones comparten UNA sola conexión,
-        # esencial para que SQLite in-memory sea visible entre threads.
         return create_engine(
             "sqlite:///:memory:",
             connect_args={"check_same_thread": False},
             poolclass=StaticPool,
             echo=False,
         )
-    # Producción / desarrollo: SQL Server via taxteclib con retry de drivers
-    client = _try_drivers(
+
+    if not settings.DB_USER:
+        return _try_drivers_trusted(settings.DB_SERVER, settings.DB_NAME)
+
+    return _try_drivers_sql(
         server=settings.DB_SERVER,
         database=settings.DB_NAME,
         user=settings.DB_USER,
         password=settings.DB_PASSWORD,
     )
-    return client.engine
 
 
 engine = _build_engine()
@@ -98,7 +95,6 @@ class Base(DeclarativeBase):
 
 
 def get_db() -> Generator[Session, None, None]:
-    """Dependencia FastAPI que provee sesión de BD."""
     db = SessionLocal()
     try:
         yield db
