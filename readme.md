@@ -1,583 +1,386 @@
-# Gestor de Horas — Backend API
+# Gestor de Horas
 
-> Sistema interno de registro y gestión de horas del equipo de Tecnología.  
-> Reemplaza el proceso manual en Excel por un flujo automatizado con integración a Azure DevOps, exportación Excel y notificaciones a Microsoft Teams.
+> Sistema interno para que el equipo de Tecnología registre, apruebe y exporte sus horas de trabajo, integrado con Azure DevOps.
+
+Reemplaza el Excel compartido tradicional por una app web con backend en FastAPI y frontend en React.
 
 ---
 
 ## Tabla de contenidos
 
-1. [Descripción general](#descripción-general)
-2. [Stack tecnológico](#stack-tecnológico)
-3. [Arquitectura](#arquitectura)
-4. [Estructura del proyecto](#estructura-del-proyecto)
-5. [Modelos de datos](#modelos-de-datos)
-6. [API Reference](#api-reference)
-7. [Sistema de permisos (RBAC)](#sistema-de-permisos-rbac)
-8. [Instalación y configuración](#instalación-y-configuración)
-9. [Variables de entorno](#variables-de-entorno)
-10. [Ejecución](#ejecución)
-11. [Tests](#tests)
-12. [Integración con Azure DevOps](#integración-con-azure-devops)
-13. [Export Excel](#export-excel)
-14. [Notificaciones Teams](#notificaciones-teams)
-15. [Flujo de aprobación de horas](#flujo-de-aprobación-de-horas)
-16. [Roadmap](#roadmap)
+1. [Stack](#stack)
+2. [Arranque rápido (TL;DR)](#arranque-rápido-tldr)
+3. [Instalación detallada](#instalación-detallada)
+   - [Requisitos previos](#requisitos-previos)
+   - [Backend](#backend)
+   - [Frontend](#frontend)
+4. [Cómo correr la app día a día](#cómo-correr-la-app-día-a-día)
+5. [Variables de entorno](#variables-de-entorno)
+6. [Scripts de utilidad](#scripts-de-utilidad)
+   - [`limpiar_horas.py` — borrar registros](#limpiar_horaspy--borrar-registros)
+   - [`seed.py` y `seed_proyectos.py` — cargar datos iniciales](#seedpy-y-seed_proyectospy--cargar-datos-iniciales)
+   - [`reset_pass.py` — resetear contraseña](#reset_passpy--resetear-contraseña)
+7. [Estructura del proyecto](#estructura-del-proyecto)
+8. [Flujo de trabajo en la app](#flujo-de-trabajo-en-la-app)
+9. [Tests](#tests)
+10. [Solución de problemas comunes](#solución-de-problemas-comunes)
+11. [Roadmap](#roadmap)
 
 ---
 
-## Descripción general
+## Stack
 
-El Gestor de Horas es una API REST construida con **FastAPI** que centraliza el registro de horas del equipo de tecnología. Cada profesional carga sus horas diarias contra proyectos y tareas de Azure DevOps; los Tech Leads las aprueban o rechazan; y al cierre de cada semana se genera automáticamente el Excel oficial que antes se completaba a mano.
-
-### Problemas que resuelve
-
-| Antes | Ahora |
+| Capa | Tecnología |
 |---|---|
-| Excel compartido propenso a errores | API REST con validaciones automáticas |
-| Horas cargadas sin vinculación a tareas ADO | Sincronización automática Epic→Feature→US→Task |
-| Proceso de aprobación por email/Teams manual | Flujo Borrador→Enviado→Aprobado/Rechazado |
-| Excel generado manualmente cada semana | Generación automática con un solo endpoint |
-| Sin auditoría ni trazabilidad | Audit log completo de todas las acciones |
+| **Backend** | FastAPI, SQLAlchemy 2, Pydantic v2, Alembic |
+| **Auth** | JWT (python-jose) + bcrypt |
+| **Base de datos** | SQL Server (Windows Auth en local; SQL Auth en QA/Prod) |
+| **Frontend** | React 19, Vite 8, TailwindCSS v4, React Router, Axios |
+| **Integración** | Azure DevOps SDK, Microsoft Teams Webhooks, openpyxl |
+| **Tests** | pytest, pytest-cov, Faker |
 
 ---
 
-## Stack tecnológico
+## Arranque rápido (TL;DR)
 
-| Componente | Tecnología |
-|---|---|
-| **API** | FastAPI 0.111 + Uvicorn |
-| **ORM** | SQLAlchemy 2.0 (async-ready) |
-| **Base de datos** | SQL Server (producción) / SQLite (tests) |
-| **Validación** | Pydantic v2 |
-| **Autenticación** | JWT (python-jose) + bcrypt |
-| **Migraciones** | Alembic |
-| **Azure DevOps** | azure-devops SDK (PAT readonly) |
-| **Excel** | openpyxl |
-| **Notificaciones** | Microsoft Teams Webhook (Adaptive Cards) |
-| **HTTP client** | httpx |
-| **Testing** | pytest + pytest-cov + Faker + Robot Framework |
-| **DB interna** | taxteclib (cliente SQL Server corporativo) |
+Si ya hiciste todo esto antes y solo querés ver el comando completo:
 
----
+```bash
+# Backend (terminal 1)
+cd gestor-horas-backend
+.venv\Scripts\activate
+set PYTHONPATH=src
+set APP_ENV=development
+uvicorn app.main:app --reload --reload-dir src
 
-## Arquitectura
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        FastAPI App                          │
-│                                                             │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
-│  │   Routers    │  │    Deps      │  │    Middleware     │  │
-│  │  /api/v1/    │  │  JWT + RBAC  │  │  CORS / Logging  │  │
-│  └──────┬───────┘  └──────────────┘  └──────────────────┘  │
-│         │                                                   │
-│  ┌──────▼───────────────────────────────────────────────┐   │
-│  │                    Services                          │   │
-│  │  hora_service │ ado_service │ export_service         │   │
-│  └──────┬───────────────────────────────────────────────┘   │
-│         │                                                   │
-│  ┌──────▼───────┐  ┌──────────────┐  ┌──────────────────┐  │
-│  │    Models    │  │   Schemas    │  │      Core        │  │
-│  │  SQLAlchemy  │  │   Pydantic   │  │ config/security  │  │
-│  └──────┬───────┘  └──────────────┘  └──────────────────┘  │
-└─────────┼───────────────────────────────────────────────────┘
-          │
-    ┌─────▼──────┐     ┌──────────────┐     ┌─────────────┐
-    │ SQL Server │     │ Azure DevOps │     │    Teams    │
-    │ (taxteclib)│     │   REST API   │     │  Webhook    │
-    └────────────┘     └──────────────┘     └─────────────┘
+# Frontend (terminal 2)
+cd gestor-horas-backend\frontend
+npm run dev
 ```
 
-### Decisiones de diseño
+Abrí http://localhost:5173 y logueate con el usuario admin del seed.
 
-- **`src/` layout**: el código fuente vive en `src/app/` para evitar imports accidentales desde la raíz y poder instalar el paquete limpiamente.
-- **`StaticPool` en tests**: SQLite en memoria con `StaticPool` garantiza que todas las sesiones de la misma ejecución de pytest compartan la misma base de datos.
-- **RBAC dinámico**: los permisos no están hardcodeados en el código sino almacenados en la tabla `permisos` y asignados a roles. Agregar un nuevo permiso es solo un INSERT.
-- **Soft delete**: los usuarios y proyectos se desactivan (`activo=False`) en lugar de eliminarse, preservando la integridad referencial del historial de horas.
+Si es la primera vez, seguí la sección de abajo.
+
+---
+
+## Instalación detallada
+
+### Requisitos previos
+
+| Herramienta | Versión | Verificación |
+|---|---|---|
+| **Python** | 3.11+ | `python --version` |
+| **Node.js** | 20+ | `node --version` |
+| **Git** | cualquiera | `git --version` |
+| **SQL Server** | 2019+ Express o superior | desde SSMS |
+| **ODBC Driver 17 for SQL Server** | — | [descargar de Microsoft](https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server) |
+
+> **Si trabajás en una máquina Windows corporativa**, probablemente ya tengas todo menos Node. Verificá con los comandos de la columna derecha.
+
+### Backend
+
+```bash
+# 1. Clonar el repo
+git clone https://github.com/Leonardo-Caracciolo/gestor-horas-backend.git
+cd gestor-horas-backend
+
+# 2. Crear entorno virtual (una sola vez)
+python -m venv .venv
+
+# 3. Activar el venv (CADA VEZ que abras una terminal nueva)
+# Windows
+.venv\Scripts\activate
+# Linux/Mac
+source .venv/bin/activate
+
+# 4. Instalar dependencias
+pip install -r requirements.txt
+
+# 5. Copiar el archivo de configuración y editarlo
+copy .env.example .env       # Windows
+cp .env.example .env         # Linux/Mac
+# → Abrir .env con un editor y completar los valores (ver más abajo)
+
+# 6. Aplicar las migraciones (crea las tablas en la BD)
+set PYTHONPATH=src           # Windows
+export PYTHONPATH=src        # Linux/Mac
+alembic upgrade head
+
+# 7. Cargar datos iniciales (admin + proyectos OFICINA y BPS)
+python seed.py
+python seed_proyectos.py
+```
+
+Si todo salió bien, deberías poder levantar el backend con:
+
+```bash
+set APP_ENV=development
+uvicorn app.main:app --reload --reload-dir src
+```
+
+Y entrar a http://localhost:8000/docs para ver la API.
+
+### Frontend
+
+```bash
+# Desde la raíz del repo
+cd frontend
+
+# Instalar dependencias (una sola vez)
+npm install --legacy-peer-deps
+
+# Levantar el dev server
+npm run dev
+```
+
+> El flag `--legacy-peer-deps` es necesario por un conflicto entre Vite 8 y TailwindCSS v4 al momento de escribir esto. Sin él, `npm install` falla.
+
+Abrí http://localhost:5173 y logueate con las credenciales del admin (las definís vos en `seed.py` la primera vez que lo corrés).
+
+---
+
+## Cómo correr la app día a día
+
+Necesitás **dos terminales abiertas**, una para el backend y otra para el frontend:
+
+**Terminal 1 — Backend:**
+```bash
+cd gestor-horas-backend
+.venv\Scripts\activate
+set PYTHONPATH=src
+set APP_ENV=development
+uvicorn app.main:app --reload --reload-dir src
+```
+
+**Terminal 2 — Frontend:**
+```bash
+cd gestor-horas-backend\frontend
+npm run dev
+```
+
+| URL | Para qué |
+|---|---|
+| http://localhost:5173 | App (lo que usás) |
+| http://localhost:8000/docs | Swagger — probar endpoints sueltos |
+| http://localhost:8000/health | Health check |
+
+Para parar cualquiera de los dos: `Ctrl+C` en su terminal.
+
+---
+
+## Variables de entorno
+
+Todas se leen de un archivo `.env` en la raíz. Hay un `.env.example` con los nombres y formato — copialo y completalo.
+
+### Obligatorias
+
+| Variable | Ejemplo | Notas |
+|---|---|---|
+| `APP_ENV` | `development` | `development`, `production` o `testing` |
+| `DB_SERVER` | `LAPTOP\SQLEXPRESS01` | Nombre o IP del servidor SQL |
+| `DB_DATABASE` | `Tecnologia` | Nombre de la BD |
+| `DB_USER` | `sa` | Solo si usás SQL Auth. Si es Windows Auth, dejá vacío |
+| `DB_PASSWORD` | `MiPass123` | Solo si usás SQL Auth |
+| `SECRET_KEY` | `abc123...` (32+ chars) | JWT — generá con el comando de abajo |
+
+```bash
+# Generar una SECRET_KEY segura
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+### Opcionales
+
+| Variable | Default | Notas |
+|---|---|---|
+| `DB_PORT` | `1433` | Puerto SQL Server |
+| `CORS_ORIGINS` | `http://localhost:5173` | Separar con coma si hay varios |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `480` | Duración del JWT (8h por defecto) |
+| `ADO_ORGANIZATION_URL` | — | Ej: `https://dev.azure.com/AR-Deloitte-BPS-Tax-Tech` |
+| `ADO_PROJECT` | — | Nombre del proyecto en ADO |
+| `ADO_PAT` | — | Personal Access Token, **solo lectura de Work Items** |
+| `TEAMS_WEBHOOK_URL` | — | Webhook del canal de Teams para notificaciones |
+
+> **Importante:** `APP_ENV=development` debe estar seteado para que CORS deje pasar al frontend desde `localhost:5173`. Si te aparecen errores de CORS en consola, este es el primer lugar a revisar.
+
+---
+
+## Scripts de utilidad
+
+Todos se corren desde la raíz del repo, con el venv activado y `PYTHONPATH=src`.
+
+### `limpiar_horas.py` — borrar registros
+
+Borra registros de la tabla `registros_horas` y sus aprobaciones asociadas. Pensado para limpiar datos de prueba durante el desarrollo.
+
+**No usar en producción sin saber lo que hacés.** Borra de verdad.
+
+#### Uso
+
+```bash
+# Activar venv y configurar PYTHONPATH primero
+.venv\Scripts\activate
+set PYTHONPATH=src
+
+# Ver cuánto se borraría sin borrar nada
+python limpiar_horas.py --dry-run
+
+# Borrar TODOS los registros de TODOS los usuarios (pide confirmación)
+python limpiar_horas.py
+
+# Borrar solo los registros de un usuario específico
+python limpiar_horas.py --usuario 1
+
+# Sin pedir confirmación (cuidado)
+python limpiar_horas.py --yes
+```
+
+#### Qué hace
+
+1. Cuenta cuántos registros y cuántas aprobaciones se borrarían.
+2. Pide que escribas literalmente `borrar` para confirmar (a menos que pases `--yes`).
+3. Borra primero las aprobaciones (por la FK), después los registros.
+4. Hace commit de la transacción.
+
+Los IDs de la tabla **no se reinician**. Si querés que `id` vuelva a empezar en 1 después del borrado, corré desde SSMS:
+
+```sql
+DBCC CHECKIDENT ('registros_horas', RESEED, 0);
+DBCC CHECKIDENT ('aprobaciones', RESEED, 0);
+```
+
+### `seed.py` y `seed_proyectos.py` — cargar datos iniciales
+
+Solo la primera vez que armás la BD desde cero (o después de un `alembic downgrade base`).
+
+```bash
+python seed.py            # crea roles, permisos, usuario admin
+python seed_proyectos.py  # crea proyectos OFICINA (id=1) y BPS (id=2)
+```
+
+### `reset_pass.py` — resetear contraseña
+
+Si te olvidaste tu contraseña en local:
+
+```bash
+python reset_pass.py
+```
+
+Te pide username y password nuevo. Solo funciona desde la máquina con acceso a la BD (no es un endpoint).
 
 ---
 
 ## Estructura del proyecto
 
 ```
-gestor-horas-final/
-│
-├── src/
-│   └── app/
-│       ├── main.py                  # Entrada: app FastAPI, routers, lifespan
-│       ├── api/
-│       │   └── v1/
-│       │       ├── deps.py          # Dependencias: get_current_user, require_permiso
-│       │       └── routers/
-│       │           ├── auth.py          # POST /login, GET /me
-│       │           ├── usuarios.py      # CRUD usuarios + cambiar password
-│       │           ├── proyectos.py     # CRUD proyectos + sync ADO + items
-│       │           ├── sprints.py       # CRUD sprints + activar/cerrar
-│       │           ├── ceremonias.py    # CRUD ceremonias Scrum por sprint
-│       │           ├── horas.py         # CRUD horas + timer + enviar + aprobar
-│       │           ├── feriados.py      # CRUD feriados
-│       │           └── export.py        # Semanas + descarga Excel + Teams test
-│       ├── core/
-│       │   ├── config.py            # Settings via pydantic-settings + .env
-│       │   ├── database.py          # Engine SQLAlchemy + get_db + StaticPool test
-│       │   └── security.py          # JWT encode/decode, hash/verify password
-│       ├── models/                  # Modelos SQLAlchemy (15 tablas)
-│       │   ├── usuario.py
-│       │   ├── rol.py
-│       │   ├── permiso.py           # Permiso + RolPermiso (M:M)
-│       │   ├── proyecto.py
-│       │   ├── sprint.py
-│       │   ├── ado_item.py          # Epic/Feature/UserStory/Task (autorreferencial)
-│       │   ├── registro_hora.py     # Tabla central del sistema
-│       │   ├── hora_planificada.py  # Planificado vs ejecutado por sprint
-│       │   ├── ceremonia_scrum.py
-│       │   ├── feriado.py
-│       │   ├── semana.py
-│       │   └── aprobacion.py        # Aprobacion + TareaFavorita + AuditLog
-│       ├── schemas/                 # Schemas Pydantic (request/response)
-│       │   ├── auth.py, usuario.py, proyecto.py, sprint.py
-│       │   ├── ado_item.py, hora.py, feriado.py, semana.py, ceremonia.py
-│       └── services/
-│           ├── ado_service.py       # Sync Epic→Feature→US→Task desde ADO
-│           ├── hora_service.py      # Validaciones + timer + flujo aprobación
-│           └── export_service.py    # Generación Excel + cierre semana + Teams
-│
-├── tests/
-│   ├── conftest.py                  # Fixtures unitarios (engine_test, db, mocks)
-│   ├── unit/
-│   │   └── models/
-│   │       ├── test_usuario.py      # 16 tests
-│   │       ├── test_security.py     # 9 tests
-│   │       └── test_registro_hora.py # 12 tests
-│   └── integration/
-│       ├── conftest.py              # Engine SQLite StaticPool + seed + fixtures session
-│       ├── test_auth.py             # 11 tests
-│       ├── test_usuarios.py         # 18 tests
-│       ├── test_horas.py            # 14 tests
-│       ├── test_proyectos.py        # 13 tests
-│       ├── test_sprints.py          # 9 tests
-│       ├── test_feriados.py         # 6 tests
-│       └── test_export.py           # 9 tests
-│
-├── alembic/                         # Migraciones de base de datos
-├── .env.example                     # Plantilla de variables de entorno
-├── pytest.ini                       # Configuración pytest + markers + coverage
-├── requirements.txt                 # Dependencias del proyecto
-└── README.md
+gestor-horas-backend/
+├── alembic/                    # Migraciones de BD
+│   └── versions/
+├── src/app/                    # Código del backend
+│   ├── api/v1/                 # Routers de FastAPI
+│   ├── core/                   # config, database, security
+│   ├── models/                 # Modelos SQLAlchemy
+│   ├── schemas/                # Pydantic
+│   └── services/               # Lógica de negocio (hora_service, ado_service, ...)
+├── frontend/                   # App React + Vite
+│   ├── src/
+│   │   ├── api/                # Wrappers axios
+│   │   ├── components/         # FormularioHora, ...
+│   │   ├── context/            # AuthContext
+│   │   └── pages/              # MisHoras, HistorialHoras, Usuarios, Login, ...
+│   └── package.json
+├── tests/                      # pytest
+├── seed.py                     # Carga de admin + permisos
+├── seed_proyectos.py           # Carga de proyectos OFICINA y BPS
+├── reset_pass.py               # Reset de contraseña local
+├── limpiar_horas.py            # Borrado de registros de horas
+├── requirements.txt
+├── alembic.ini
+└── .env.example
 ```
 
 ---
 
-## Modelos de datos
+## Flujo de trabajo en la app
 
-### Diagrama de relaciones
+1. **Login**: usuario y contraseña, devuelve JWT.
+2. **Mis Horas** (vista semanal): el usuario ve la semana actual día por día y puede cargar nuevas horas con el botón "+ Cargar horas".
+3. **Cargar hora**: elige tipo (PROYECTO/OFICINA) → si es PROYECTO, selecciona Epic → Feature → Task/User Story (cascada de datos sincronizados de ADO) → completa fecha, descripción y horas. Las horas se auto-aprueban (no hay flujo de aprobación activo en v1).
+4. **Historial**: vista tabla con filtros por fecha y estado, ordenamiento por columnas, total al pie.
+5. **Usuarios** (solo admins): ABM de usuarios del equipo.
 
-```
-Rol ──< RolPermiso >── Permiso
- │
- └──< Usuario
-          │
-          ├──< RegistroHora >── Proyecto ──< Sprint ──< CeremoniaSprint
-          │         │                │
-          │         └── AdoItem ◄────┘ (autorreferencial: Epic→Feature→US→Task)
-          │
-          ├──< Aprobacion (1:1 con RegistroHora)
-          ├──< TareaFavorita >── AdoItem
-          └──< AuditLog
+### Validaciones del backend (no son bugs, son reglas)
 
-Semana ──► Sprint (opcional)
-```
-
-### Tablas principales
-
-| Tabla | Descripción |
-|---|---|
-| `usuarios` | Profesionales del equipo. `activo`, `primer_login`, `password_hash` |
-| `roles` | Admin, TechLead, Profesional, etc. Configurables |
-| `permisos` | Claves de permiso (ej: `ver_horas_equipo`). RBAC dinámico |
-| `proyectos` | Centro de costos. `tipo`: Proyecto u Oficina. `id_proyecto_excel` |
-| `sprints` | Iteraciones de 2 semanas. Estados: Planificado→Activo→Cerrado |
-| `ado_items` | Work Items de ADO. Jerarquía autorreferencial por `parent_id` |
-| `registros_horas` | **Tabla central**. Una fila = un profesional, un día, N horas |
-| `semanas` | Semanas laborales. Cierre bloquea nuevas imputaciones |
-| `aprobaciones` | Decisión del Tech Lead sobre cada registro |
-| `audit_log` | Trazabilidad completa de todas las acciones |
-
----
-
-## API Reference
-
-### Auth
-
-| Método | Endpoint | Descripción | Permiso |
-|---|---|---|---|
-| `POST` | `/api/v1/auth/login` | Login con usuario/password → JWT | — |
-| `GET` | `/api/v1/auth/me` | Datos del usuario autenticado | Autenticado |
-
-### Usuarios
-
-| Método | Endpoint | Descripción | Permiso |
-|---|---|---|---|
-| `GET` | `/api/v1/usuarios/` | Listar usuarios | `admin_usuarios` |
-| `POST` | `/api/v1/usuarios/` | Crear usuario | `admin_usuarios` |
-| `GET` | `/api/v1/usuarios/{id}` | Obtener por ID | `admin_usuarios` |
-| `PUT` | `/api/v1/usuarios/{id}` | Actualizar | `admin_usuarios` |
-| `DELETE` | `/api/v1/usuarios/{id}` | Desactivar (soft delete) | `admin_usuarios` |
-| `POST` | `/api/v1/usuarios/me/password` | Cambiar propia contraseña | Autenticado |
-
-### Proyectos
-
-| Método | Endpoint | Descripción | Permiso |
-|---|---|---|---|
-| `GET` | `/api/v1/proyectos/` | Listar proyectos | Autenticado |
-| `POST` | `/api/v1/proyectos/` | Crear proyecto | `admin_proyectos` |
-| `GET` | `/api/v1/proyectos/{id}` | Obtener por ID | Autenticado |
-| `PUT` | `/api/v1/proyectos/{id}` | Actualizar | `admin_proyectos` |
-| `DELETE` | `/api/v1/proyectos/{id}` | Desactivar | `admin_proyectos` |
-| `POST` | `/api/v1/proyectos/{id}/sync-ado` | Sincronizar con ADO | `admin_proyectos` |
-| `GET` | `/api/v1/proyectos/{id}/items` | Work Items del proyecto | Autenticado |
-| `GET` | `/api/v1/proyectos/{id}/items/arbol` | Jerarquía anidada (Epics→Tasks) | Autenticado |
-
-### Sprints
-
-| Método | Endpoint | Descripción | Permiso |
-|---|---|---|---|
-| `GET` | `/api/v1/sprints/` | Listar sprints | Autenticado |
-| `POST` | `/api/v1/sprints/` | Crear sprint | `admin_proyectos` |
-| `GET` | `/api/v1/sprints/{id}` | Obtener por ID | Autenticado |
-| `PUT` | `/api/v1/sprints/{id}` | Actualizar | `admin_proyectos` |
-| `POST` | `/api/v1/sprints/{id}/activar` | Planificado → Activo | `admin_proyectos` |
-| `POST` | `/api/v1/sprints/{id}/cerrar` | Activo → Cerrado | `cerrar_sprint` |
-| `GET` | `/api/v1/sprints/{id}/ceremonias/` | Listar ceremonias | Autenticado |
-| `POST` | `/api/v1/sprints/{id}/ceremonias/` | Registrar ceremonia | Autenticado |
-| `PUT` | `/api/v1/sprints/{id}/ceremonias/{cid}` | Actualizar ceremonia | Autenticado |
-| `DELETE` | `/api/v1/sprints/{id}/ceremonias/{cid}` | Eliminar ceremonia | Autenticado |
-
-### Horas
-
-| Método | Endpoint | Descripción | Permiso |
-|---|---|---|---|
-| `GET` | `/api/v1/horas/` | Mis registros (con filtros) | Autenticado |
-| `POST` | `/api/v1/horas/` | Crear registro | Autenticado |
-| `GET` | `/api/v1/horas/semana` | Resumen semana actual (5 días) | Autenticado |
-| `GET` | `/api/v1/horas/equipo` | Horas de todo el equipo | `ver_horas_equipo` |
-| `GET` | `/api/v1/horas/{id}` | Obtener registro | Autenticado |
-| `PUT` | `/api/v1/horas/{id}` | Editar (solo Borrador) | Propietario |
-| `DELETE` | `/api/v1/horas/{id}` | Eliminar (solo Borrador) | Propietario |
-| `POST` | `/api/v1/horas/enviar` | Enviar semana a aprobación | Autenticado |
-| `POST` | `/api/v1/horas/{id}/aprobar` | Aprobar o rechazar | `aprobar_horas` |
-| `POST` | `/api/v1/horas/timer/iniciar` | Iniciar timer | Autenticado |
-| `POST` | `/api/v1/horas/{id}/timer/detener` | Detener timer y calcular horas | Propietario |
-
-### Feriados
-
-| Método | Endpoint | Descripción | Permiso |
-|---|---|---|---|
-| `GET` | `/api/v1/feriados/` | Listar feriados | Autenticado |
-| `POST` | `/api/v1/feriados/` | Crear feriado | `admin_feriados` |
-| `PUT` | `/api/v1/feriados/{id}` | Actualizar | `admin_feriados` |
-| `DELETE` | `/api/v1/feriados/{id}` | Eliminar | `admin_feriados` |
-
-### Export y Semanas
-
-| Método | Endpoint | Descripción | Permiso |
-|---|---|---|---|
-| `GET` | `/api/v1/export/semanas/` | Listar semanas | Autenticado |
-| `POST` | `/api/v1/export/semanas/` | Crear semana | `admin_proyectos` |
-| `POST` | `/api/v1/export/semanas/{id}/cerrar` | Cerrar semana | `cerrar_sprint` |
-| `GET` | `/api/v1/export/semanas/{id}/excel` | Descargar Excel `.xlsx` | `exportar_excel` |
-| `POST` | `/api/v1/export/teams/test` | Probar webhook Teams | `admin_proyectos` |
-
----
-
-## Sistema de permisos (RBAC)
-
-Los permisos son **dinámicos**: se almacenan en la tabla `permisos` y se asignan a roles mediante `rol_permisos`. No es necesario modificar código para agregar nuevos permisos.
-
-### Permisos del sistema
-
-| Clave | Módulo | Descripción |
-|---|---|---|
-| `admin_usuarios` | usuarios | Crear, editar y desactivar usuarios |
-| `admin_proyectos` | proyectos | Crear/editar proyectos, sprints y semanas |
-| `ver_horas_equipo` | horas | Ver registros de cualquier usuario |
-| `aprobar_horas` | horas | Aprobar o rechazar registros enviados |
-| `cerrar_sprint` | sprints | Cerrar sprints y semanas |
-| `exportar_excel` | export | Descargar el Excel semanal |
-| `admin_feriados` | feriados | Gestionar feriados |
-
-### Roles sugeridos
-
-| Rol | Permisos recomendados |
-|---|---|
-| **Admin** | Todos |
-| **Tech Lead** | `ver_horas_equipo`, `aprobar_horas`, `cerrar_sprint`, `exportar_excel` |
-| **Profesional** | — (solo sus propias horas) |
-
----
-
-## Instalación y configuración
-
-### Requisitos previos
-
-- Python **3.11** o superior
-- **ODBC Driver 17 for SQL Server** instalado
-- Acceso a una instancia de SQL Server
-- Git
-
-### Pasos
-
-```bash
-# 1. Descomprimir o clonar el proyecto
-cd gestor-horas-final
-
-# 2. Crear entorno virtual
-python -m venv .venv
-
-# Windows
-.venv\Scripts\activate
-
-# Linux / Mac
-source .venv/bin/activate
-
-# 3. Instalar dependencias
-pip install -r requirements.txt
-
-# 4. Copiar y completar el .env
-copy .env.example .env      # Windows
-cp .env.example .env        # Linux/Mac
-# → Editar .env con los datos reales (ver sección Variables de entorno)
-
-# 5. Crear tablas en la BD
-set PYTHONPATH=src           # Windows
-export PYTHONPATH=src        # Linux/Mac
-alembic upgrade head
-
-# 6. Levantar el servidor
-uvicorn app.main:app --reload
-```
-
----
-
-## Variables de entorno
-
-Todas las variables se leen desde el archivo `.env` en la raíz del proyecto.
-
-### Obligatorias
-
-| Variable | Ejemplo | Descripción |
-|---|---|---|
-| `APP_ENV` | `development` | Entorno: `development`, `production` o `testing` |
-| `DB_SERVER` | `LAPTOP-XYZ\SQLEXPRESS` | Servidor SQL Server (nombre o IP) |
-| `DB_DATABASE` | `gestor_horas` | Nombre de la base de datos |
-| `DB_USER` | `sa` | Usuario de la BD |
-| `DB_PASSWORD` | `MiPassword123` | Contraseña de la BD |
-| `SECRET_KEY` | `abc123...` | Clave JWT — mínimo 32 caracteres aleatorios |
-
-### Opcionales
-
-| Variable | Default | Descripción |
-|---|---|---|
-| `DB_PORT` | `1433` | Puerto SQL Server |
-| `APP_VERSION` | `1.0.0` | Versión mostrada en `/health` y Swagger |
-| `CORS_ORIGINS` | `http://localhost:5173` | Orígenes CORS permitidos (separados por coma) |
-| `ALGORITHM` | `HS256` | Algoritmo JWT |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | `480` | Expiración del token (8 horas por defecto) |
-| `ADO_ORGANIZATION_URL` | — | URL de la organización ADO (ej: `https://dev.azure.com/mi-org`) |
-| `ADO_PROJECT` | — | Nombre del proyecto en ADO |
-| `ADO_PAT` | — | Personal Access Token de ADO (solo lectura) |
-| `TEAMS_WEBHOOK_URL` | — | URL del webhook del canal de Teams |
-
-> **Nota:** Si `APP_ENV=testing`, la app ignora la configuración de SQL Server y usa SQLite en memoria automáticamente.
-
-### Generar SECRET_KEY
-
-```bash
-python -c "import secrets; print(secrets.token_hex(32))"
-```
-
----
-
-## Ejecución
-
-### Servidor de desarrollo
-
-```bash
-# Con recarga automática ante cambios de código
-set PYTHONPATH=src && uvicorn app.main:app --reload --port 8000
-```
-
-Accedé a la documentación interactiva en:
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
-- **Health check**: http://localhost:8000/health
-
-### Producción
-
-```bash
-set PYTHONPATH=src && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
-```
-
-> En producción, Swagger y ReDoc se deshabilitan automáticamente (`APP_ENV != development`).
+- No se pueden cargar horas en sábado o domingo (devuelve 400).
+- No se pueden cargar horas en feriados (los gestiona la tabla `feriados`).
+- Máximo 12 horas por día por usuario.
+- Las semanas pueden cerrarse — una vez cerradas, no se pueden cargar más horas en ese rango.
+- Solo se pueden editar/borrar registros en estado `Borrador`.
 
 ---
 
 ## Tests
 
-### Estructura
-
-Los tests están divididos en tres niveles:
-
-| Nivel | Ubicación | BD | Tests |
-|---|---|---|---|
-| **Unitarios** | `tests/unit/` | Sin BD | 37 tests |
-| **Integración** | `tests/integration/` | SQLite en memoria | 80 tests |
-| **E2E** | `tests/e2e/` | BD de homologación | Robot Framework |
-
-**Total: 117 tests — 100% pasando.**
-
-### Comandos
-
 ```bash
-# Todos los tests (sin coverage)
-APP_ENV=testing pytest tests/unit/ tests/integration/ --no-cov
+# Activar venv + PYTHONPATH primero
+set PYTHONPATH=src
+set APP_ENV=testing
 
-# Con reporte de coverage
-APP_ENV=testing pytest tests/unit/ tests/integration/
+# Correr todo
+pytest
 
-# Solo unitarios
-APP_ENV=testing pytest tests/unit/ --no-cov
-
-# Solo integración
-APP_ENV=testing pytest tests/integration/ --no-cov
-
-# Un módulo específico
-APP_ENV=testing pytest tests/integration/test_horas.py --no-cov -v
-
-# Por marker
-APP_ENV=testing pytest -m integration --no-cov
-APP_ENV=testing pytest -m unit --no-cov
+# Con cobertura
+pytest --cov=app --cov-report=html
+# El reporte HTML queda en htmlcov/index.html
 ```
 
-### Markers disponibles
-
-| Marker | Descripción |
-|---|---|
-| `unit` | Tests sin dependencias externas |
-| `integration` | Tests con BD SQLite en memoria |
-| `e2e` | Tests contra entorno de homologación |
-| `smoke` | Suite de smoke tests pre-release |
-| `slow` | Tests lentos (excluir con `-m "not slow"`) |
+Los tests usan SQLite en memoria, no tocan tu SQL Server local.
 
 ---
 
-## Integración con Azure DevOps
+## Solución de problemas comunes
 
-La sincronización descarga la jerarquía completa de Work Items de un proyecto ADO y la persiste localmente.
+### "Cannot connect to SQL Server"
 
-### Configuración
+- Confirmá que el servicio de SQL Server esté corriendo (Services → "SQL Server (SQLEXPRESS01)").
+- Si usás Windows Auth, no pongas `DB_USER` ni `DB_PASSWORD` en `.env`.
+- El nombre del server lleva backslash escapado en el `.env`: `LAPTOP\\SQLEXPRESS01` o entre comillas: `"LAPTOP\SQLEXPRESS01"`.
 
-```env
-ADO_ORGANIZATION_URL=https://dev.azure.com/mi-organizacion
-ADO_PROJECT=NombreDelProyecto
-ADO_PAT=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
+### Errores de CORS en la consola del navegador
 
-El PAT necesita únicamente el permiso **Work Items — Read**.
+- Asegurate de tener `APP_ENV=development` seteado **antes** de levantar uvicorn.
+- Si cambiaste el puerto del frontend, agregalo a `CORS_ORIGINS`.
 
-### Proceso de sincronización
+### "Objects are not valid as a React child" + pantalla en blanco
 
-```
-POST /api/v1/proyectos/{id}/sync-ado
-```
+Significa que algún componente está renderizando un objeto donde se espera un string. Pasó con `u.rol` (que es `{id, nombre}`, no un string) y con `detail` de errores Pydantic. Si te aparece de nuevo, revisá el último cambio que hiciste al JSX y buscá un `{algoQueEsObjeto}`.
 
-1. Ejecuta consultas WIQL por tipo: Epic → Feature → User Story → Task
-2. Descarga detalles en batches de 200 (límite de la API de ADO)
-3. Hace upsert respetando la jerarquía (un Epic debe existir antes que su Feature)
-4. Marca como `activo=False` los Work Items que ya no existen en ADO
-5. Retorna conteos por tipo
+### El frontend no se actualiza después de cambiar código
 
-> La sincronización es idempotente — se puede ejecutar múltiples veces sin duplicar datos.
+- `Ctrl+Shift+R` en el navegador para forzar recarga sin caché.
+- Si seguís viendo lo viejo, parar `npm run dev` y volver a levantarlo.
 
----
+### Uvicorn tira `WatchFiles permission error` en Windows
 
-## Export Excel
+Levantalo siempre con `--reload-dir src` para que solo vigile el código fuente y no la BD ni `.venv`.
 
-El Excel generado sigue el formato oficial del equipo:
+### Caracteres raros (`├`, `─`, `→`) rompen un `.bat`
 
-| Columna | Contenido |
-|---|---|
-| Día | Nombre del día (Lunes, Martes…) |
-| Mes | Nombre del mes (Enero, Febrero…) |
-| Año | Número de año |
-| Nombre | Nombre completo del profesional |
-| Tipo | `Proyecto` u `Oficina` |
-| ID Proyecto | Código del proyecto (`id_proyecto_excel`) |
-| Descripción | Descripción del trabajo realizado |
-| Tarea | `[ADO_ID] Título` o nombre manual |
-| Horas | Horas con 2 decimales |
-
-Incluye subtotales por usuario y total general. El archivo se descarga directamente como `.xlsx`:
-
-```
-GET /api/v1/export/semanas/{id}/excel
-```
-
----
-
-## Notificaciones Teams
-
-Se envían Adaptive Cards al canal de Teams configurado en los siguientes eventos:
-
-- Cierre de semana (`POST /export/semanas/{id}/cerrar`)
-- Prueba manual (`POST /export/teams/test`)
-
-Si `TEAMS_WEBHOOK_URL` no está configurado, las notificaciones se omiten silenciosamente sin afectar el flujo principal.
-
----
-
-## Flujo de aprobación de horas
-
-```
-Profesional carga horas
-        │
-        ▼
-   [BORRADOR] ──── editar / eliminar
-        │
-        │  POST /horas/enviar
-        ▼
-   [ENVIADO] ──── no se puede editar
-        │
-        │  POST /horas/{id}/aprobar
-        ├──────────────────────────────────┐
-        ▼                                  ▼
-   [APROBADO]                        [RECHAZADO]
-  incluido en Excel              vuelve a Borrador
-                                  para corrección
-```
-
-### Validaciones en la carga
-
-- ❌ No se puede cargar en **fines de semana**
-- ❌ No se puede cargar en **feriados** (`aplica_a_todos=True`)
-- ❌ No se puede cargar en **semanas cerradas**
-- ❌ No se pueden superar **12 horas por día** por usuario
-- ❌ No se puede tener **más de un timer activo** simultáneamente
-- ❌ No se puede editar o eliminar un registro que no sea **Borrador**
+`cmd.exe` no maneja Unicode por default. En `.bat` usá solo ASCII.
 
 ---
 
 ## Roadmap
 
-| Fase | Estado | Descripción |
+| Versión | Estado | Funcionalidad |
 |---|---|---|
-| **Fase 1** | ✅ Completa | Modelos, config, database, security — 37 tests |
-| **Fase 2** | ✅ Completa | Auth JWT, CRUD usuarios, RBAC |
-| **Fase 3** | ✅ Completa | Proyectos, sprints, sync ADO |
-| **Fase 4** | ✅ Completa | Carga de horas, timer, flujo aprobación |
-| **Fase 5** | ✅ Completa | Ceremonias Scrum, cierre de semana, export Excel, Teams |
-| **Fase 6** | 🔲 Pendiente | Frontend React + Vite + TailwindCSS |
-| **Fase 7** | 🔲 Pendiente | Empaquetado como `.exe` con PyWebView + PyInstaller |
-| **Fase 8** | 🔲 Pendiente | Dagster jobs (sync ADO nocturno, cierre automático) |
-| **Fase 9** | 🔲 Pendiente | Dashboard Power BI |
+| **v1.0** | ✅ Liberada | Backend completo, frontend con Mis Horas / Historial / Usuarios, sync ADO, export Excel semanal |
+| **v2.0** | 🔲 Planeada | Login con Microsoft Teams (Entra ID), gestión de roles desde la UI, migración a BD compartida `Tecnologia_QA`, vista admin de horas del equipo, export Excel filtrado |
+| **v3.0** | 🔲 Idea | Embed de dashboards Power BI, notificaciones automáticas en Teams |
+
+---
+
+## Contacto
+
+Mantenedor: **Leonardo Caracciolo**
+Repo: https://github.com/Leonardo-Caracciolo/gestor-horas-backend
