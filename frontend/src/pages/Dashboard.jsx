@@ -1,7 +1,13 @@
 import { Routes, Route, NavLink, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import MisHoras from './MisHoras'
+import HistorialHoras from './HistorialHoras'
 import Usuarios from './Usuarios'
+
+const linkClass = ({ isActive }) =>
+  `block px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+    isActive ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100'
+  }`
 
 export default function Dashboard() {
   const { user, logout, hasPermiso } = useAuth()
@@ -21,27 +27,14 @@ export default function Dashboard() {
         </div>
 
         <nav className="flex-1 px-3 py-4 space-y-1">
-          <NavLink
-            to="/"
-            end
-            className={({ isActive }) =>
-              `block px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                isActive ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100'
-              }`
-            }
-          >
+          <NavLink to="/" end className={linkClass}>
             Mis Horas
           </NavLink>
-
+          <NavLink to="/historial" className={linkClass}>
+            Historial
+          </NavLink>
           {hasPermiso('admin_usuarios') && (
-            <NavLink
-              to="/usuarios"
-              className={({ isActive }) =>
-                `block px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                  isActive ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100'
-                }`
-              }
-            >
+            <NavLink to="/usuarios" className={linkClass}>
               Usuarios
             </NavLink>
           )}
@@ -64,6 +57,7 @@ export default function Dashboard() {
       <main className="flex-1 p-8 overflow-auto">
         <Routes>
           <Route path="/" element={<MisHoras />} />
+          <Route path="/historial" element={<HistorialHoras />} />
           <Route path="/usuarios" element={<Usuarios />} />
         </Routes>
       </main>

@@ -36,14 +36,6 @@ class RegistroHoraCreate(BaseModel):
             raise ValueError("La descripción no puede estar vacía")
         return v.strip()
 
-    # @model_validator(mode="after")
-    # def tarea_requerida(self) -> "RegistroHoraCreate":
-    #     if not self.es_ceremonia and not self.ado_task_id and not self.tarea_manual:
-    #         raise ValueError(
-    #             "Se requiere ado_task_id o tarea_manual cuando no es una ceremonia"
-    #         )
-        return self
-
 
 class RegistroHoraUpdate(BaseModel):
     """Payload para editar un registro en estado Borrador."""

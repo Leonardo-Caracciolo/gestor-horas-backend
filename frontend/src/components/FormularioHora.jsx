@@ -5,13 +5,54 @@ import { getItemsProyecto } from '../api/proyectos'
 const PROYECTO_OFICINA_ID = 1
 const PROYECTO_BPS_ID = 2
 
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+/**
+ * Extrae un mensaje string de cualquier forma de error axios/fetch.
+ * Esto evita el bug clásico "Objects are not valid as a React child":
+ * FastAPI devuelve detail como array de ValidationError en 422s.
+ */
 function parseError(err) {
   const detail = err?.response?.data?.detail
-  if (!detail) return 'Error al guardar'
-  if (Array.isArray(detail)) return detail.map(d => d.msg || JSON.stringify(d)).join(', ')
+
   if (typeof detail === 'string') return detail
-  return 'Error al guardar'
+
+  if (Array.isArray(detail)) {
+    // Array de Pydantic ValidationError: [{type, loc, msg, input, ctx}, ...]
+    return detail
+      .map(d => {
+        if (!d || typeof d !== 'object') return String(d)
+        const campo = Array.isArray(d.loc) ? d.loc.filter(x => x !== 'body').join('.') : ''
+        const msg = d.msg || 'inválido'
+        return campo ? `${campo}: ${msg}` : msg
+      })
+      .join(' · ')
+  }
+
+  if (detail && typeof detail === 'object') {
+    return detail.msg || JSON.stringify(detail)
+  }
+
+  return err?.message || 'Error al guardar'
 }
+
+/** Retorna la fecha default: hoy si es hábil, si no el viernes hábil anterior. */
+function fechaDefaultHabil() {
+  const d = new Date()
+  const dow = d.getDay() // 0=dom, 6=sab
+  if (dow === 6) d.setDate(d.getDate() - 1)       // sab → vie
+  else if (dow === 0) d.setDate(d.getDate() - 2)  // dom → vie
+  return d.toISOString().split('T')[0]
+}
+
+/** true si YYYY-MM-DD cae en sab/dom. */
+function esFinDeSemana(iso) {
+  const [y, m, d] = iso.split('-').map(Number)
+  const dow = new Date(y, m - 1, d).getDay()
+  return dow === 0 || dow === 6
+}
+
+// ── Componente ───────────────────────────────────────────────────────────
 
 export default function FormularioHora({ onCerrar }) {
   const [tipo, setTipo] = useState('PROYECTO')
@@ -20,7 +61,7 @@ export default function FormularioHora({ onCerrar }) {
   const [featureSel, setFeatureSel] = useState('')
   const [itemSel, setItemSel] = useState('')
   const [form, setForm] = useState({
-    fecha: new Date().toISOString().split('T')[0],
+    fecha: fechaDefaultHabil(),
     descripcion: '',
     horas: '',
   })
@@ -29,10 +70,13 @@ export default function FormularioHora({ onCerrar }) {
 
   useEffect(() => {
     if (tipo === 'PROYECTO') {
-      getItemsProyecto(PROYECTO_BPS_ID).then(res => setTodosItems(res.data)).catch(() => {})
+      getItemsProyecto(PROYECTO_BPS_ID)
+        .then(res => setTodosItems(Array.isArray(res.data) ? res.data : []))
+        .catch(() => setTodosItems([]))
     }
   }, [tipo])
 
+  // Cascada Epic → Feature → Task/UserStory (por id local, ya que parent_id es local)
   const epics = todosItems.filter(i => i.tipo === 'Epic')
   const epicSelObj = epics.find(e => String(e.id) === epicSel)
   const features = epicSelObj
@@ -40,18 +84,32 @@ export default function FormularioHora({ onCerrar }) {
     : []
   const featureSelObj = features.find(f => String(f.id) === featureSel)
   const tasks = featureSelObj
-    ? todosItems.filter(i => (i.tipo === 'Task' || i.tipo === 'User Story') && i.parent_id === featureSelObj.id)
+    ? todosItems.filter(
+        i => (i.tipo === 'Task' || i.tipo === 'User Story') && i.parent_id === featureSelObj.id
+      )
     : []
 
   const handleSubmit = async (e) => {
     e.preventDefault()
     setError('')
+
+    // Validaciones cliente-side (evitan roundtrip al backend)
+    if (esFinDeSemana(form.fecha)) {
+      setError('No se pueden cargar horas en sábado o domingo')
+      return
+    }
+    const horasNum = parseFloat(form.horas)
+    if (!horasNum || horasNum <= 0) {
+      setError('Ingresá una cantidad de horas válida')
+      return
+    }
+
     setLoading(true)
     try {
       await crearHora({
         fecha: form.fecha,
         descripcion: form.descripcion,
-        horas: parseFloat(form.horas),
+        horas: horasNum,
         proyecto_id: tipo === 'OFICINA' ? PROYECTO_OFICINA_ID : PROYECTO_BPS_ID,
         ado_task_id: itemSel ? parseInt(itemSel) : null,
         es_ceremonia: false,
@@ -69,7 +127,12 @@ export default function FormularioHora({ onCerrar }) {
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between mb-5">
           <h3 className="text-base font-bold text-gray-800">Cargar horas</h3>
-          <button onClick={onCerrar} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+          <button
+            onClick={onCerrar}
+            className="text-gray-400 hover:text-gray-600 text-xl leading-none"
+          >
+            &times;
+          </button>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -77,54 +140,101 @@ export default function FormularioHora({ onCerrar }) {
             <label className="block text-sm font-medium text-gray-700 mb-2">Tipo</label>
             <div className="flex gap-2">
               {['PROYECTO', 'OFICINA'].map(t => (
-                <button key={t} type="button"
-                  onClick={() => { setTipo(t); setEpicSel(''); setFeatureSel(''); setItemSel('') }}
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => {
+                    setTipo(t)
+                    setEpicSel('')
+                    setFeatureSel('')
+                    setItemSel('')
+                  }}
                   className={`flex-1 py-2 rounded-lg text-sm font-medium transition-colors ${
-                    tipo === t ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                    tipo === t
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                   }`}
-                >{t}</button>
+                >
+                  {t}
+                </button>
               ))}
             </div>
           </div>
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Fecha</label>
-            <input type="date" value={form.fecha}
-              onChange={e => setForm({ ...form, fecha: e.target.value })} required
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            <input
+              type="date"
+              value={form.fecha}
+              onChange={e => setForm({ ...form, fecha: e.target.value })}
+              required
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
           </div>
 
           {tipo === 'PROYECTO' && (
             <>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Epica ({epics.length})</label>
-                <select value={epicSel}
-                  onChange={e => { setEpicSel(e.target.value); setFeatureSel(''); setItemSel('') }}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Epica ({epics.length})
+                </label>
+                <select
+                  value={epicSel}
+                  onChange={e => {
+                    setEpicSel(e.target.value)
+                    setFeatureSel('')
+                    setItemSel('')
+                  }}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
                   <option value="">Selecciona una epica</option>
-                  {epics.map(e => <option key={e.id} value={e.id}>[{e.ado_id}] {e.titulo}</option>)}
+                  {epics.map(e => (
+                    <option key={e.id} value={e.id}>
+                      [{e.ado_id}] {e.titulo}
+                    </option>
+                  ))}
                 </select>
               </div>
 
               {epicSel && (
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Feature ({features.length})</label>
-                  <select value={featureSel}
-                    onChange={e => { setFeatureSel(e.target.value); setItemSel('') }}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Feature ({features.length})
+                  </label>
+                  <select
+                    value={featureSel}
+                    onChange={e => {
+                      setFeatureSel(e.target.value)
+                      setItemSel('')
+                    }}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
                     <option value="">Selecciona una feature</option>
-                    {features.map(f => <option key={f.id} value={f.id}>[{f.ado_id}] {f.titulo}</option>)}
+                    {features.map(f => (
+                      <option key={f.id} value={f.id}>
+                        [{f.ado_id}] {f.titulo}
+                      </option>
+                    ))}
                   </select>
                 </div>
               )}
 
               {featureSel && (
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Tarea / User Story ({tasks.length})</label>
-                  <select value={itemSel} onChange={e => setItemSel(e.target.value)}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Tarea / User Story ({tasks.length})
+                  </label>
+                  <select
+                    value={itemSel}
+                    onChange={e => setItemSel(e.target.value)}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
                     <option value="">Selecciona una tarea</option>
-                    {tasks.map(t => <option key={t.id} value={t.id}>[{t.ado_id}] {t.titulo}</option>)}
+                    {tasks.map(t => (
+                      <option key={t.id} value={t.id}>
+                        [{t.ado_id}] {t.titulo}
+                      </option>
+                    ))}
                   </select>
                 </div>
               )}
@@ -133,29 +243,50 @@ export default function FormularioHora({ onCerrar }) {
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Descripcion</label>
-            <textarea value={form.descripcion}
+            <textarea
+              value={form.descripcion}
               onChange={e => setForm({ ...form, descripcion: e.target.value })}
-              required rows={3} placeholder="Que hiciste?"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none" />
+              required
+              rows={3}
+              placeholder="Que hiciste?"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+            />
           </div>
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Horas</label>
-            <input type="number" value={form.horas}
+            <input
+              type="number"
+              value={form.horas}
               onChange={e => setForm({ ...form, horas: e.target.value })}
-              required min="0.25" max="12" step="0.25" placeholder="0.00"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              required
+              min="0.25"
+              max="12"
+              step="0.25"
+              placeholder="0.00"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
           </div>
 
-          {error && <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">{error}</p>}
+          {error && (
+            <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2 whitespace-pre-wrap">
+              {error}
+            </p>
+          )}
 
           <div className="flex gap-3 pt-1">
-            <button type="button" onClick={onCerrar}
-              className="flex-1 px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors">
+            <button
+              type="button"
+              onClick={onCerrar}
+              className="flex-1 px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+            >
               Cancelar
             </button>
-            <button type="submit" disabled={loading}
-              className="flex-1 px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 rounded-lg transition-colors">
+            <button
+              type="submit"
+              disabled={loading}
+              className="flex-1 px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 rounded-lg transition-colors"
+            >
               {loading ? 'Guardando...' : 'Cargar'}
             </button>
           </div>
