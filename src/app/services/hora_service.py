@@ -142,7 +142,7 @@ def crear_registro(
         tarea_manual=payload.tarea_manual,
         horas=payload.horas,
         es_ceremonia=payload.es_ceremonia,
-        estado=EstadoRegistro.BORRADOR,
+        estado=EstadoRegistro.APROBADO,
     )
     db.add(registro)
     db.commit()
@@ -318,7 +318,7 @@ def iniciar_timer(
         descripcion=descripcion,
         tarea_manual=tarea_manual,
         horas=Decimal("0.00"),
-        estado=EstadoRegistro.BORRADOR,
+        estado=EstadoRegistro.APROBADO,
         timer_inicio=ahora,
     )
     db.add(registro)

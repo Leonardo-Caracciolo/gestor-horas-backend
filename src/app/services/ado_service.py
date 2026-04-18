@@ -65,7 +65,7 @@ def _fetch_ids_by_type(client, ado_project: str, tipo: str) -> list[int]:
             f"ORDER BY [System.Id]"
         )
     }
-    result = client.query_by_wiql(wiql, project=ado_project)
+    result = client.query_by_wiql(wiql)
     return [item.id for item in (result.work_items or [])]
 
 
